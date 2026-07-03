@@ -21,6 +21,28 @@ from datetime import datetime, timezone
 CSV_PATH = os.environ.get("CALLS_CSV", "calls.csv")
 FIELDS = ["ts", "mint", "channel", "bet_sol", "entry", "exit", "ath", "pnl_pct", "note"]
 
+try:
+    from colorama import init as _init_colorama, Fore, Style
+    _init_colorama()
+    GREEN = Fore.GREEN
+    RED = Fore.RED
+    RESET = Style.RESET_ALL
+except ImportError:
+    GREEN = "\033[32m"
+    RED = "\033[31m"
+    RESET = "\033[0m"
+
+
+def _color_number(value):
+    if value is None or value == "":
+        return ""
+    try:
+        v = float(value)
+    except (ValueError, TypeError):
+        return str(value)
+    text = f"{v:+.2f}%"
+    return f"{GREEN}{text}{RESET}" if v >= 0 else f"{RED}{text}{RESET}"
+
 
 def _read():
     if not os.path.exists(CSV_PATH):
@@ -84,10 +106,10 @@ def stats():
 
     print(f"Trades closed    : {n}")
     print(f"Win rate         : {wr*100:.1f}%  ({len(wins)}W / {len(losses)}L)")
-    print(f"Avg win          : {avg_w:+.1f}%   Avg loss      : {avg_l:+.1f}%")
+    print(f"Avg win          : {_color_number(avg_w)}   Avg loss      : {_color_number(avg_l)}")
     print(f"Rugs/Honeypots   : {len(tails)}  ({len(tails)/n*100:.1f}%)")
-    print(f"Best / worst     : {max(pnls):+.0f}% / {min(pnls):+.0f}%")
-    print(f"Growth/call      : {(math.exp(g)-1)*100:+.2f}% (geom., bet {f*100:.0f}%)")
+    print(f"Best / worst     : {_color_number(max(pnls))} / {_color_number(min(pnls))}")
+    print(f"Growth/call      : {_color_number((math.exp(g)-1)*100)} (geom., bet {f*100:.0f}%)")
     print(f"                   {'>0 => compounding' if g>0 else '<0 => shrinking, review sizing/exit'}")
     print(f"\n-> feed these figures into montecarlo.py --empirical")
 
@@ -98,8 +120,9 @@ def show():
         print("Empty.")
         return
     for r in rows:
+        pnl = _color_number(r['pnl_pct'])
         print(f"{r['ts'][:16]}  {r['mint'][:8]:8}  bet={r['bet_sol']:>5}  "
-              f"pnl={str(r['pnl_pct']):>7}%  {r['note']}")
+              f"pnl={pnl:>11}  {r['note']}")
 
 
 if __name__ == "__main__":
