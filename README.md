@@ -49,3 +49,19 @@ CALLS_CSV=/path/my.csv python logger.py stats    # use another log file
 - Telethon userbot = your account on autopilot → run it on a **secondary account**.
 - Set a bankroll stop (e.g. cut at ~1.5 SOL) and a **fixed-fraction** bet size.
 - None of this is financial advice.
+
+## Telegram token notifier
+
+Add a small Telegram bot that watches messages for token contract addresses and replies with token info + a GMGN deep link.
+
+Setup:
+```
+pip install -r requirements.txt
+export TELEGRAM_BOT_TOKEN="<your-bot-token>"       # Windows: set TELEGRAM_BOT_TOKEN=...
+export GMGN_DEEP_LINK="https://gmgn.app/token"     # optional deep link base
+python telegram_bot.py
+```
+
+Notes:
+- Add the bot to the channel or chat you want to monitor and give it permission to read messages.
+- The script uses CoinGecko's public API to fetch token metadata. If CoinGecko doesn't know the contract, you'll only get the deep link.
