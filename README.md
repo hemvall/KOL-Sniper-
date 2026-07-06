@@ -1,5 +1,5 @@
 # KOL Sniper
-
+### A SOLANA sniper bot designed to frontrun telegram channels announcements
 Files: `sniper.py` (auto-buy) · `logger.py` (call log) · `montecarlo.py` (projection) · `calls.csv` (data) · `.env` (config)
 
 ## Setup (once)
