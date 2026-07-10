@@ -19,6 +19,7 @@ import requests
 import websockets
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
+from notify import send_telegram_notification
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
@@ -177,6 +178,12 @@ async def handler(event):
     sig = await asyncio.get_event_loop().run_in_executor(None, buy, mint)
     if sig:
         log.info("BUY sent: https://solscan.io/tx/%s", sig)
+        # notify via Telegram bot (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in env)
+        try:
+            text = f"Bought token {mint} for {BUY_SOL} SOL\nTx: https://solscan.io/tx/{sig}"
+            await asyncio.get_event_loop().run_in_executor(None, send_telegram_notification, text)
+        except Exception as e:
+            log.error("Telegram notify failed: %s", e)
         if AUTOSELL:
             asyncio.create_task(monitor_and_sell(mint))
     else:
