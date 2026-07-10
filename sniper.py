@@ -13,6 +13,7 @@ import re
 import json
 import asyncio
 import logging
+import time
 from typing import Optional
 
 import requests
@@ -125,6 +126,36 @@ def buy(mint: str) -> Optional[str]:
 def sell_all(mint: str) -> Optional[str]:
     return _send("sell", mint, "100%", "false")
 
+
+def estimate_entry_price(mint: str, timeout: float = 2.0) -> Optional[float]:
+    """Best-effort, low-cost price estimate from PumpPortal data.
+
+    This uses a single short live fetch and returns None if the feed is unavailable,
+    so it does not slow the buy flow materially.
+    """
+    if not PUMPPORTAL_KEY:
+        return None
+    uri = f"{WS_DATA}?api-key={PUMPPORTAL_KEY}"
+    try:
+        import websockets
+        start = time.monotonic()
+        async def _fetch() -> Optional[float]:
+            async with websockets.connect(uri) as ws:
+                await ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [mint]}))
+                async for raw in ws:
+                    if time.monotonic() - start >= timeout:
+                        break
+                    d = json.loads(raw)
+                    vsol, vtok = d.get("vSolInBondingCurve"), d.get("vTokensInBondingCurve")
+                    if vsol and vtok:
+                        return float(vsol) / float(vtok)
+                return None
+
+        return asyncio.get_event_loop().run_until_complete(_fetch())
+    except Exception as exc:
+        log.debug("entry price fetch failed for %s: %s", mint[:6], exc)
+        return None
+
 # ---------------------------------------------------------------- Auto-sell TP/SL
 async def monitor_and_sell(mint: str):
     """Track price via PumpPortal WS and sell on TP or SL.
@@ -182,17 +213,21 @@ async def handler(event):
         # prepare enhanced notification
         try:
             channel = str(getattr(event, 'chat_id', ''))
-                deep_link_base = os.getenv('GMGN_DEEP_LINK', 'https://gmgn.ai/sol/token')
+            deep_link_base = os.getenv('GMGN_DEEP_LINK', 'https://gmgn.ai/sol/token')
             deep_link = deep_link_base.rstrip('/') + '/' + mint
+            entry_price = await asyncio.get_event_loop().run_in_executor(None, estimate_entry_price, mint)
             text_lines = [
                 f"🟩 BUY executed",
                 f"Mint: {mint}",
                 f"Bet: {BUY_SOL} SOL",
+            ]
+            if entry_price is not None:
+                text_lines.append(f"Entry price: {entry_price:.10f} SOL")
+            text_lines.extend([
                 f"Tx: https://solscan.io/tx/{sig}",
                 f"GMGN: {deep_link}",
                 f"Channel: {channel}",
-            ]
-            # entry price not available immediately; leave placeholder
+            ])
             text = "\n".join(text_lines)
             notified = await asyncio.get_event_loop().run_in_executor(None, send_telegram_notification, text)
         except Exception as e:
