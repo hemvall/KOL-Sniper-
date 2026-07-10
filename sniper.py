@@ -13,6 +13,7 @@ import re
 import json
 import asyncio
 import logging
+import threading
 from typing import Optional
 
 import requests
@@ -53,13 +54,68 @@ TRADE_LOCAL = "https://pumpportal.fun/api/trade-local"
 WS_DATA = "wss://pumpportal.fun/api/data"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
-keypair = Keypair.from_base58_string(PRIVATE_KEY)
-PUBKEY = str(keypair.pubkey())
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 log = logging.getLogger("sniper")
 
-bought: set[str] = set()          # dedupe: avoid buying the same mint twice
+try:
+    keypair = Keypair.from_base58_string(PRIVATE_KEY)
+    PUBKEY = str(keypair.pubkey())
+except Exception as exc:
+    log.warning("Invalid SOL private key: %s", exc)
+    keypair = None
+    PUBKEY = ""
+
+
+class PersistentBoughtMints:
+    """Fast in-memory dedupe store backed by a small on-disk file."""
+
+    def __init__(self, path: Optional[str] = None):
+        self._path = path or os.path.join(os.path.dirname(__file__), "bought_mints.txt")
+        self._mints: set[str] = set()
+        self._lock = threading.Lock()
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self._path):
+            return
+        with open(self._path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                mint = line.strip()
+                if mint:
+                    self._mints.add(mint)
+
+    def contains(self, mint: str) -> bool:
+        with self._lock:
+            return mint in self._mints
+
+    def mark_pending(self, mint: str) -> None:
+        with self._lock:
+            self._mints.add(mint)
+
+    def mark_bought(self, mint: str, confirmed: bool = True) -> None:
+        with self._lock:
+            if not confirmed:
+                return
+            if mint in self._mints:
+                return
+            self._mints.add(mint)
+            self._append_to_disk(mint)
+
+    def remove(self, mint: str) -> None:
+        with self._lock:
+            self._mints.discard(mint)
+
+    def _append_to_disk(self, mint: str) -> None:
+        directory = os.path.dirname(self._path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(self._path, "a", encoding="utf-8") as fh:
+            fh.write(f"{mint}\n")
+
+
+bought = PersistentBoughtMints(
+    os.environ.get("BOUGHT_MINTS_FILE", os.path.join(os.path.dirname(__file__), "bought_mints.txt"))
+)
 
 # ---------------------------------------------------------------- mint parsing
 _URL_RE = re.compile(
@@ -97,6 +153,10 @@ def extract_mint(text: str) -> Optional[str]:
 
 # ---------------------------------------------------------------- Exécution on-chain
 def _send(action: str, mint: str, amount, denominated_in_sol: str) -> Optional[str]:
+    if keypair is None:
+        log.error("Cannot send transaction: wallet key is unavailable")
+        return None
+
     r = requests.post(TRADE_LOCAL, data={
         "publicKey": PUBKEY,
         "action": action,
@@ -171,13 +231,14 @@ client = TelegramClient("sniper_session", API_ID, API_HASH)
 @client.on(events.NewMessage(chats=CHANNELS))
 async def handler(event):
     mint = extract_mint(event.raw_text)
-    if not mint or mint in bought:
+    if not mint or bought.contains(mint):
         return
-    bought.add(mint)
+    bought.mark_pending(mint)
     log.info("CALL detected: %s", mint)
     # requests is blocking -> use executor to avoid freezing the loop
     sig = await asyncio.get_event_loop().run_in_executor(None, buy, mint)
     if sig:
+        bought.mark_bought(mint, confirmed=True)
         log.info("BUY sent: https://solscan.io/tx/%s", sig)
         # prepare enhanced notification
         try:
@@ -206,7 +267,7 @@ async def handler(event):
         if AUTOSELL:
             asyncio.create_task(monitor_and_sell(mint))
     else:
-        bought.discard(mint)              # failure -> allow retry if reposted
+        bought.remove(mint)              # failure -> allow retry if reposted
 
 
 async def main():
