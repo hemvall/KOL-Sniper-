@@ -123,8 +123,6 @@ def stats():
     print(f"Best / worst     : {_color_number(max(pnls))} / {_color_number(min(pnls))}")
     print(f"Growth/call      : {_color_number((math.exp(g)-1)*100)} (geom., bet {f*100:.0f}%)")
     print(f"                   {'>0 => compounding' if g>0 else '<0 => shrinking, review sizing/exit'}")
-    print(f"\n-> feed these figures into montecarlo.py --empirical")
-
 
 def show():
     rows = _read()
