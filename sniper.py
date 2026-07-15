@@ -17,6 +17,7 @@ import time
 from typing import Optional
 
 import requests
+from requests.adapters import HTTPAdapter
 import websockets
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
@@ -38,7 +39,14 @@ API_HASH = os.environ["TG_API_HASH"]
 CHANNELS = [c.strip() for c in os.environ["TG_CHANNELS"].split(",") if c.strip()]
 
 PRIVATE_KEY = os.environ["SOL_PRIVATE_KEY"]                      # base58 burner wallet key
-RPC_URL = os.environ.get("SOL_RPC_URL", "https://api.mainnet-beta.solana.com")
+# Prefer a low-latency Helius RPC when a key is provided; the public RPC is slow
+# and rate-limits precisely when calls hit. Falls back to SOL_RPC_URL / public.
+HELIUS_API_KEY = os.environ.get("HELIUS_API_KEY", "").strip()
+HELIUS_NETWORK = os.environ.get("HELIUS_NETWORK", "mainnet").strip()      # mainnet / devnet
+if HELIUS_API_KEY:
+    RPC_URL = f"https://{HELIUS_NETWORK}.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+else:
+    RPC_URL = os.environ.get("SOL_RPC_URL", "https://api.mainnet-beta.solana.com")
 BUY_SOL = float(os.environ.get("BUY_SOL", "0.5"))              # buy size per snipe (SOL)
 SLIPPAGE = int(os.environ.get("SLIPPAGE", "15"))               # %
 PRIORITY_FEE = float(os.environ.get("PRIORITY_FEE", "0.001"))  # SOL (raise if txs don't land)
@@ -56,6 +64,12 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 
 keypair = Keypair.from_base58_string(PRIVATE_KEY)
 PUBKEY = str(keypair.pubkey())
+
+session = requests.Session()
+_adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20)
+session.mount("https://", _adapter)
+session.mount("http://", _adapter)
+session.headers.update({"Connection": "keep-alive"})
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 log = logging.getLogger("sniper")
@@ -98,7 +112,7 @@ def extract_mint(text: str) -> Optional[str]:
 
 # ---------------------------------------------------------------- Exécution on-chain
 def _send(action: str, mint: str, amount, denominated_in_sol: str) -> Optional[str]:
-    r = requests.post(TRADE_LOCAL, data={
+    r = session.post(TRADE_LOCAL, data={
         "publicKey": PUBKEY,
         "action": action,
         "mint": mint,
@@ -114,9 +128,24 @@ def _send(action: str, mint: str, amount, denominated_in_sol: str) -> Optional[s
     tx = VersionedTransaction(VersionedTransaction.from_bytes(r.content).message, [keypair])
     cfg = RpcSendTransactionConfig(preflight_commitment=CommitmentLevel.Confirmed)
     payload = SendVersionedTransaction(tx, cfg).to_json()
-    resp = requests.post(RPC_URL, headers={"Content-Type": "application/json"},
-                         data=payload, timeout=10)
+    resp = session.post(RPC_URL, headers={"Content-Type": "application/json"},
+                        data=payload, timeout=10)
     return resp.json().get("result")
+
+
+def _warm_connections() -> None:
+    """Open the PumpPortal + RPC sockets before the first call so we don't pay
+    the TLS handshake on the hot path. Best-effort; failures are non-fatal."""
+    try:
+        session.get(TRADE_LOCAL.rsplit("/api/", 1)[0], timeout=5)
+    except Exception as exc:
+        log.debug("warm PumpPortal failed: %s", exc)
+    try:
+        session.post(RPC_URL, headers={"Content-Type": "application/json"},
+                     data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getHealth"}),
+                     timeout=5)
+    except Exception as exc:
+        log.debug("warm RPC failed: %s", exc)
 
 
 def buy(mint: str) -> Optional[str]:
@@ -246,7 +275,10 @@ async def handler(event):
 
 async def main():
     async with client:
-        log.info("Listening on %s | wallet %s | %s SOL/snipe", CHANNELS, PUBKEY, BUY_SOL)
+        await asyncio.get_event_loop().run_in_executor(None, _warm_connections)
+        rpc_label = "Helius" if HELIUS_API_KEY else RPC_URL
+        log.info("Listening on %s | wallet %s | %s SOL/snipe | RPC %s",
+                 CHANNELS, PUBKEY, BUY_SOL, rpc_label)
         await client.run_until_disconnected()
 
 
