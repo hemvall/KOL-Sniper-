@@ -15,28 +15,37 @@ prix : ordres de grandeur à re-mesurer, l'écosystème bouge tous les trimestre
 
 ---
 
-## 0. TL;DR — les trois décisions qui comptent
+## 0. TL;DR — recalé sur la réalité mesurée
 
-1. **Le goulot n° 1 n'est pas le RPC, c'est la réception du signal.** Sur un canal
-   Telegram à fort trafic, un userbot Telethon passif reçoit le message avec
-   **20 à 45 s de retard** (fan-out Telegram déprioritisé) — pendant que Bloom/Maestro
-   snipent en ~0,15 s après réception. Deux parades : optimiser agressivement la
-   réception Telegram (§2.2) et, surtout, **surveiller le wallet du KOL on-chain** :
-   il achète *avant* de poster, donc un stream gRPC sur son wallet donne le signal
-   10 s à plusieurs minutes avant même que le post existe (§2.1). C'est le seul
-   moyen d'être structurellement « premier » — tout le reste ne fait que réduire
-   l'écart avec les bots commerciaux.
-2. **Le chemin d'envoi actuel est le pire possible.** RPC public gratuit + double
-   aller-retour HTTP PumpPortal + fee statique ≈ 2-6 s signal→landed et des échecs
-   en congestion. Cible : build local de la tx + Helius Sender (Amsterdam) + tips
-   dynamiques ≈ 0,4-0,8 s, same-slot atteignable. (§3-§4)
-3. **À 2+ SOL, la survie se joue hors latence.** Sur une curve fraîche, 2 SOL
-   d'entrée coûtent ~6,7 % d'impact moyen + 1,25 % de frais : il faut ~x1,17 juste
-   pour le break-even. Sans filtres pré-achat, exits disciplinés, sizing par KOL et
-   kill-switch, être premier signifie seulement perdre plus vite. (§5-§8)
+**Baseline réelle (confirmée par l'utilisateur) : ~0,7 s message Telegram →
+transaction _confirmée on-chain_, sur RPC Helius premium, taille déjà à 1,0 SOL.**
+Un slot fait 0,4 s : vous atterrissez donc à ~1 slot du message, vous êtes **déjà
+quasi same-slot**. Le diagnostic « vous êtes 2-6 s derrière sur RPC public » était
+faux. Conséquences :
 
-**Ne pas commencer par monter `BUY_SOL`.** Monter la taille est la dernière étape,
-une fois la machine prouvée sur petite taille (§11).
+1. **Raboter encore la latence ne rapporte presque rien — vous êtes au plancher.**
+   « Être premier dans la queue » à ce stade = gagner l'**ordre _à l'intérieur_ du
+   slot**, et cet ordre s'achète : priority fee + **tip Jito**. Aujourd'hui, sans
+   tip, vous êtes classé au hasard parmi les tx du même slot. **C'est le gain n°1**,
+   pour 0,001-0,01 SOL/trade (§4.3). Ajouter Helius Sender (fan-out Jito+SWQoS,
+   gratuit, même compte Helius) route la tx là où le tip compte.
+2. **Pour passer _devant_ avant que la queue existe** (avant le post), un seul
+   levier : le signal on-chain. Le KOL achète avant de poster ; ses wallets tournent
+   à chaque call, donc on ne suit pas le wallet, on **remonte son financement**
+   (§2.1). Ne marche que pour les KOL au financement traçable — sinon on court le
+   post, et le post se gagne au tip (point 1).
+3. **Le build local de la tx** (§3) enlève l'aller-retour PumpPortal : ~0,1-0,2 s +
+   0,5 % de frais/trade économisés. Utile, pas transformateur à votre niveau.
+
+**Périmètre demandé : « fast au buy pour le moment ».** Le plan est recentré sur le
+buy. Les exits/PnL sont mis en différé à votre demande — un seul rappel, non répété :
+`calls.csv` ne contient **aucune sortie** (zéro entry/exit/pnl sur les trades réels),
+donc l'EV par canal est aujourd'hui inconnue ; à 2 SOL c'est le vrai risque, mais
+c'est votre appel (§7 gardé pour plus tard).
+
+**Ne pas commencer par monter `BUY_SOL`.** À 0,7 s-confirmé, la latence est réglée ;
+ce qui reste à sécuriser avant 2 SOL, c'est le tip, l'impact de curve (§5) et le
+dédup persistant (§10). Monter la taille en dernier.
 
 ---
 
@@ -66,50 +75,64 @@ Données 2024-2026, sources académiques et industrie :
 
 ## 2. Étape A — Gagner la course au signal (le plus gros gain)
 
-### 2.1 Prio absolue : copier le wallet du KOL, pas son post
+### 2.1 Copier l'achat du KOL malgré les wallets tournants : remonter le financement
 
-Le KOL achète on-chain **avant** de poster (pattern documenté : « buy before they
-post, sell into the demand »). Toute personne qui lit le post — vous inclus — est en
-retard par construction. Le contournement :
+Le KOL achète on-chain **avant** de poster. Toute personne qui lit le post est en
+retard par construction. Problème réel constaté : **le wallet d'achat change à
+chaque call** — suivre un wallet fixe ne marche pas. Ce qui marche : un wallet
+frais doit être **financé** avant d'acheter, et c'est le financement qui trahit.
 
-1. **Identifier le(s) wallet(s) d'achat du KOL** :
-   - Outils gratuits : **kolscan.io** (mapping Twitter→wallet + PnL, racheté par
-     pump.fun), labels KOL/smart-money **GMGN**, **Arkham** (Solana supporté),
-     **MadeOnSol** (1000+ wallets KOL), **Cielo** (free : 10 wallets Solana suivis ;
-     Pro ~59 $/mois : 200 wallets).
-   - Pour les wallets annexes non labellisés (fréquents) : prendre 3-5 calls passés
-     du KOL, extraire les acheteurs des 0-10 min précédant chaque post
-     (Solscan/GMGN), **intersecter les ensembles** — le wallet récurrent est le bon.
-     Re-vérifier en continu : les KOL font tourner leurs wallets. C'est le vrai
-     travail difficile de cette approche.
-2. **Streamer ce wallet en temps réel** via Yellowstone gRPC :
-   `transactionsSubscribe { accountInclude: [WALLET], commitment: processed }`,
-   parser les interactions avec le programme pump.fun
-   (`6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P`) pour extraire le mint, déclencher
-   l'achat. Détection ~100-300 ms après l'inclusion de la tx du KOL.
-3. **Fournisseurs gRPC** (juillet 2026) :
-   - Helius **LaserStream** : inclus au plan Business 499 $/mois (10 connexions,
-     9 régions dont AMS/FRA, ~5-15 ms de latence slot annoncée).
-   - Moins cher, flat : **AllenHark** ~99 $/mois, **Shyft** ~199 $/mois,
-     **SolanaTracker** ~200 €/mois (enrichi Jito Shreds, ~50-100 ms plus rapide).
-   - **Jito ShredStream** : gratuit sur approbation (keypair whitelistée), régions
-     AMS/FRA incluses — mais décodage de shreds non trivial (3-7 j de dev) ; à garder
-     pour plus tard.
-   - Bande passante filtrée sur quelques wallets : quelques GB/mois, négligeable.
+**Méthode 1 — la chaîne de financement** :
+1. Pour 5-10 calls passés : retrouver le wallet acheteur (le gros achat dans les
+   minutes précédant le post — Solscan/GMGN sur le mint), puis regarder **d'où est
+   venu son SOL** : première transaction entrante du wallet
+   (`getSignaturesForAddress` + parse, ou un clic sur Solscan). Remonter 1-2 hops
+   si besoin.
+2. Deux cas de figure :
+   - **Un financeur commun** apparaît (wallet « distributeur » du KOL, parfois
+     derrière un hop) : c'est **lui** qu'on streame, pas les wallets d'achat.
+     Watch-set gRPC dynamique : quand le financeur envoie du SOL à une adresse
+     fraîche → ajouter cette adresse à la volée au `accountInclude` de la
+     subscription Yellowstone → son premier achat pump.fun
+     (`6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P`) = signal, détecté ~100-300 ms
+     après inclusion. Le financement précède l'achat de plusieurs minutes ou
+     heures : la rotation par call ne protège pas contre ça.
+   - **Financement direct depuis un CEX** sans hop : quasi intraçable (les hot
+     wallets financent des milliers d'adresses). Pour ce KOL, la voie on-chain est
+     morte → tout miser sur la course au post (§3-§4). Re-tester périodiquement,
+     les habitudes changent.
+3. Valider la stabilité du schéma sur l'historique **avant** de trader dessus,
+   et re-valider en continu.
 
-**Impact** : signal 10 s à plusieurs minutes avant tous les bots qui lisent le canal.
-C'est le seul levier qui vous met devant Bloom/Maestro/Trojan, qui subissent le même
-fan-out Telegram que vous.
+**Méthode 2 — détecter l'entourage (fallback, bruité)** : le cercle proche achète
+souvent dans les secondes qui suivent le KOL, avant le post public. Stream gRPC sur
+le programme pump.fun entier, trigger « N wallets frais achètent > X SOL en M slots
+sur un token de moins de T minutes ». Toujours devant le post, mais faux positifs
+élevés — à backtester sur les calls loggés et à trader en taille réduite uniquement.
 
-**Risque assumé** : si le KOL utilise un wallet frais jamais vu, vous retombez sur le
-fallback Telegram. Les deux pipelines coexistent (dédup par mint, déjà en place via
-`bought`).
+**Outils d'investigation** (étape 1, pas l'exécution) : Solscan pour le graphe de
+financement ; kolscan.io, labels GMGN/Arkham, Cielo, MadeOnSol pour partir des
+identités.
 
-### 2.2 Fallback Telegram : tuer le délai de fan-out
+**Fournisseurs gRPC** (juillet 2026) : Helius **LaserStream** (inclus au plan
+Business 499 $/mois — à vérifier selon votre plan premium actuel, peut-être déjà
+disponible) ; flat moins cher : **AllenHark** ~99 $/mois, **Shyft** ~199 $/mois,
+**SolanaTracker** ~200 €/mois ; **Jito ShredStream** gratuit sur approbation
+(décodage non trivial, pour plus tard). Bande passante filtrée : négligeable.
 
-Confirmé par les issues Telethon (#3150, #652) : un compte passif sur un gros canal
-reçoit le message avec 20-45 s de retard ; un compte qui « consulte » le canal tombe
-à 1-5 s. Actions, par ordre d'impact :
+**Impact** : signal des secondes aux minutes avant tous les bots du canal — le seul
+levier qui met *devant* au lieu d'« aussi vite que ». **Limite honnête** : ça ne
+marche que si le KOL a un pattern de financement ; sinon, le jeu est la course au
+post, et elle se gagne aux §3-§4. Les deux pipelines coexistent (dédup par mint,
+déjà en place via `bought`).
+
+### 2.2 Réception Telegram : déjà rapide ici — sécuriser la queue de distribution
+
+Mesuré sur ce setup : ~0,7 s message→buy, réception comprise — les délais de fan-out
+de 20-45 s rapportés par de vieilles issues Telethon (#3150, #652 : comptes passifs,
+canaux géants, observations 2018-2021) ne s'appliquent pas ici. L'enjeu n'est donc
+pas le gain médian mais la **variance** : le call où la livraison prend 3-5 s est
+précisément celui où tout le monde se rue. Mesures d'assurance, par ordre d'utilité :
 
 - **Compte(s) dédié(s) propre(s)** : numéro européen (→ home DC Amsterdam, DC2/DC4),
   abonné **uniquement** aux canaux cibles, éventuellement Premium ⚠️ (effet plausible,
@@ -118,8 +141,9 @@ reçoit le message avec 20-45 s de retard ; un compte qui « consulte » le cana
   `UpdateNewChannelMessage` reçu (dédup par message id). L'ordre de fan-out par
   abonné est quasi aléatoire : la course en parallèle écrase la queue de latence.
 - **Poller actif ~1 Hz** en filet : `GetHistoryRequest`/`GetChannelDifference` sur le
-  canal cible (sous les flood-limits). C'est ce qui reproduit l'effet « canal ouvert
-  sur mobile » qui fait passer de 20-45 s à 1-5 s.
+  canal cible (sous les flood-limits). Garde le canal « chaud » côté serveur Telegram
+  et rattrape le call rare où le push tarde — c'est de l'assurance sur la variance,
+  pas un gain médian (votre médiane est déjà bonne).
 - **Hot path minimal** : handler sur l'update brute (pas de résolution d'entités
   dans le chemin chaud), regex précompilées (déjà le cas), `cryptg` installé,
   connexion persistante avec pings. Pas de `catch_up` (inutile en live).
@@ -229,12 +253,17 @@ par des senders de confiance (Sender `mev-protect`, Jito `bundleOnly`,
 
 ### 4.5 Budget latence cible
 
-| Étape | Actuel (estimé) | Cible palier a | Cible palier b/c |
+Baseline mesurée : **~0,7 s message → tx confirmée** (≈ 1 slot du message).
+
+| Étape | Actuel | Cible | Levier |
 |---|---|---|---|
-| Signal (post→bot) | 1-45 s (Telethon passif) | 0,3-2 s (TG optimisé) | **-10 s à -120 s** (wallet gRPC : avant le post) |
-| Build tx | 100-300 ms (PumpPortal) | <5 ms (local) | <5 ms |
-| Envoi→landed | 0,8-4 s + échecs (RPC public) | 0,4-0,8 s (Sender, 1-2 slots) | 0,4 s (same-slot possible) |
-| **Total** | **2-6 s après le post** | **~0,7-2,8 s après le post** | **avant le post** |
+| Signal (post→bot) | inclus dans les 0,7 s | idem (déjà bon) | variance couverte §2.2 ; **avant le post** via financement §2.1 |
+| Build tx | ~0,1-0,3 s (RTT PumpPortal) | <5 ms | build local §3 (+ 0,5 % de frais économisés) |
+| Envoi→confirmé | dans le slot, **sans tip = ordre aléatoire dans le slot** | même slot, **en tête** | priority fee + tip Jito §4.3 + Sender §4.1 |
+| **Total** | **~0,7 s, position non prioritaire** | **~0,5 s, prioritaire dans le slot** | — |
+
+Le gain n'est pas « moins de secondes » (il n'y en a presque plus à prendre) mais
+« premier _dans_ le slot où vous êtes déjà ».
 
 ---
 
@@ -398,6 +427,14 @@ Coût variable : ~0,002-0,011 SOL de tips/frais par trade — négligeable (<0,5
 
 ## 10. Mesurer (sinon on règle au feeling)
 
+**État des lieux lu dans `calls.csv`** : les trades réels du 10-12 juillet
+(0,001 → 0,43 → 0,4 → 1,0 SOL, 4+ canaux) n'ont **ni entry, ni exit, ni PnL**
+enregistrés — l'EV par canal/KOL est incalculable avec ces données. Et le mint
+`4t1xh…pump` a été acheté **3 fois en 15 minutes** (16:25, 16:35, 16:39) : le
+dédup `bought` vit en mémoire, chaque restart repart de zéro — à 2 SOL/trade, ce
+bug seul coûte 4-6 SOL sur un incident. Ces deux corrections passent avant toute
+optimisation de latence.
+
 Instrumenter chaque trade dans `calls.csv`/SQLite :
 - `t_signal` (réception, `time.monotonic_ns()` — `message.date` n'a qu'une précision
   d'une seconde, inutilisable), `t_built`, `t_sent`, `send_slot`, `landed_slot`,
@@ -413,23 +450,29 @@ Instrumenter chaque trade dans `calls.csv`/SQLite :
 
 ## 11. Ordre de déploiement (avec critères de passage)
 
-Chaque étape a un **gate** mesurable ; on ne passe pas à la suivante sans le franchir.
-La taille ne monte qu'à la fin.
+Recalé sur le périmètre « fast au buy » et une baseline déjà à 0,7 s-confirmé.
+L'ordre suit le rapport gain/effort réel, pas l'ambition théorique.
 
-1. **Instrumentation** (§10) sur le bot actuel, 2-3 jours de trades à 0,1-0,3 SOL.
-   → Baseline chiffrée signal→landed.
-2. **Chemin d'envoi** : build local (§3) + Helius Sender + tips dynamiques (§4) +
-   VPS Amsterdam. *Gate : landing rate >90 %, slot delta ≤2, t_sent−t_signal <50 ms.*
-3. **Signal** : Telegram optimisé multi-sessions (§2.2), puis wallet-copy gRPC (§2.1)
-   sur 2-3 KOL bien identifiés. *Gate : entrée systématiquement avant le prix du
-   post (mesuré), ou détection avant le post sur >50 % des calls en wallet-copy.*
-4. **Sécurité + exits** : filtres (§6), ladder + trigger dump + sell rapide (§7),
-   guardrails (§8). *Gate : 2 semaines à 0,3-0,5 SOL, EV nette positive après frais,
-   kill-switch jamais contourné.*
-5. **Scaling** : 0,5 → 1 → 2 SOL par paliers, sizing par KOL, en surveillant que le
-   slippage réalisé et l'EV tiennent à chaque palier (l'impact §5 croît avec la
-   taille — l'edge peut disparaître en montant). *Gate à chaque palier : EV/trade
-   stable ou croissante sur ≥30 trades.*
+1. **Tip + priority fee dynamiques** (§4.3) via Helius Sender (§4.1) — même compte
+   Helius, gratuit, quelques heures de dev. C'est le levier « premier dans le slot »
+   le plus rentable et le plus rapide à poser. *Gate : sur 2 tx concurrentes dans un
+   même slot, la vôtre passe devant (comparer l'ordre intra-slot avant/après).*
+2. **Dédup persistant + `solders` requirements** (§10, §12) — corrige le rachat
+   x3 observé ; indispensable avant de monter la taille. *Gate : un restart en
+   pleine position ne rachète pas le mint.*
+3. **Build local de la tx** (§3) : enlève l'aller-retour PumpPortal, -0,1-0,2 s +
+   0,5 % de frais. *Gate : tx construite et signée sans appel réseau sortant hors
+   send ; parité de résultat vs PumpPortal sur 20 trades.*
+4. **Impact de curve dynamique** (§5) : lire l'état de la curve, calculer l'impact,
+   capper la taille (curves fraîches ≠ migrées, vous avez dit « ça varie »).
+   *Gate : le bot refuse/réduit un ticket dont l'impact projeté dépasse le seuil.*
+5. **Signal on-chain** (§2.1) sur 2-3 KOL au financement traçable — le seul « devant
+   le post ». *Gate : détection avant le post sur >50 % des calls de ces KOL.*
+6. **Scaling** : 1 → 1,5 → 2 SOL par paliers, en surveillant le slippage réalisé
+   (l'impact §5 croît avec la taille). *Gate : slippage réalisé conforme au calcul
+   à chaque palier.*
+7. **(Différé, à ta demande) Exits + EV par canal** (§7, §8) — le jour où tu veux
+   savoir si tu es réellement profitable et sur quel canal.
 
 ---
 
@@ -454,13 +497,20 @@ Code :
       (gRPC transactionsSubscribe sur KOL_WALLETS)
 - [ ] Réécrire `monitor_and_sell` : ladder + trailing + time-stop + trigger dump
       gRPC + sell pré-construite sur chemin rapide + reconnexion
+- [ ] **Dédup persistant** : seeder `bought` depuis `calls.csv` au démarrage
+      (+ TTL) — bug observé le 10/07 : même mint acheté 3 fois après restarts
+- [ ] **Enregistrer les sorties** : chaque sell (auto ou manuel) écrit exit/pnl
+      dans `calls.csv` — aujourd'hui aucune ligne réelle n'a de PnL
 - [ ] `logger.py` : colonnes latence/slots/slippage réalisé/prix à +5s/+30s/+2min/
       +10min ; stats par KOL ; kill-switch
 - [ ] `requirements.txt` : corriger `solder` → `solders` (typo actuelle), ajouter
       `httpx`, `uvloop`, `cryptg`, client gRPC (`yellowstone-grpc` / `grpcio`)
 
 Ops :
-- [ ] VPS Amsterdam, process 24/7 (systemd), sessions Telegram chaudes
+- [ ] VPS Amsterdam, process 24/7 (systemd) — le runtime actuel est un poste
+      Windows (`run_all.bat`) : migrer l'exécution sur le VPS, garder le poste
+      comme console
+- [ ] Sessions Telegram chaudes
 - [ ] Compte(s) Telegram dédiés propres (numéro EU) ; identification wallets KOL
 - [ ] Abonnement `t.me/pump_tech_updates` (breaks de format pump.fun)
 - [ ] Dashboard latence/landing (SQLite + script suffit au début)
