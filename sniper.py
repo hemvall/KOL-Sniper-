@@ -111,7 +111,8 @@ def extract_mint(text: str) -> Optional[str]:
     return cands[0]
 
 # ---------------------------------------------------------------- Exécution on-chain
-def _send(action: str, mint: str, amount, denominated_in_sol: str) -> Optional[str]:
+def _send(action: str, mint: str, amount, denominated_in_sol: str,
+          skip_preflight: bool = False) -> Optional[str]:
     r = session.post(TRADE_LOCAL, data={
         "publicKey": PUBKEY,
         "action": action,
@@ -126,7 +127,8 @@ def _send(action: str, mint: str, amount, denominated_in_sol: str) -> Optional[s
         log.error("PumpPortal %s: %s", r.status_code, r.text[:200])
         return None
     tx = VersionedTransaction(VersionedTransaction.from_bytes(r.content).message, [keypair])
-    cfg = RpcSendTransactionConfig(preflight_commitment=CommitmentLevel.Confirmed)
+    cfg = RpcSendTransactionConfig(skip_preflight=skip_preflight,
+                                   preflight_commitment=CommitmentLevel.Confirmed)
     payload = SendVersionedTransaction(tx, cfg).to_json()
     resp = session.post(RPC_URL, headers={"Content-Type": "application/json"},
                         data=payload, timeout=10)
@@ -149,7 +151,7 @@ def _warm_connections() -> None:
 
 
 def buy(mint: str) -> Optional[str]:
-    return _send("buy", mint, BUY_SOL, "true")
+    return _send("buy", mint, BUY_SOL, "true", skip_preflight=True)
 
 
 def sell_all(mint: str) -> Optional[str]:
@@ -234,11 +236,15 @@ async def handler(event):
     if not mint or mint in bought:
         return
     bought.add(mint)
+    detected_at = time.perf_counter()
     log.info("CALL detected: %s", mint)
     # requests is blocking -> use executor to avoid freezing the loop
     sig = await asyncio.get_event_loop().run_in_executor(None, buy, mint)
+    latency_ms = int((time.perf_counter() - detected_at) * 1000)
+    _now = time.time()
+    buy_time = time.strftime("%H:%M:%S", time.localtime(_now)) + f".{int(_now * 1000) % 1000:03d}"
     if sig:
-        log.info("BUY sent: https://solscan.io/tx/%s", sig)
+        log.info("BUY sent in %d ms: https://solscan.io/tx/%s", latency_ms, sig)
         # prepare enhanced notification
         try:
             channel = str(getattr(event, 'chat_id', ''))
@@ -247,6 +253,7 @@ async def handler(event):
             entry_price = await asyncio.get_event_loop().run_in_executor(None, estimate_entry_price, mint)
             text_lines = [
                 f"🟩 BUY executed",
+                f"⏰ Latency: {latency_ms} ms",
                 f"Mint: {mint}",
                 f"Bet: {BUY_SOL} SOL",
             ]
