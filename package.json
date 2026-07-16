@@ -1,0 +1,22 @@
+{
+  "name": "kol-sniper-builder",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20 <25"
+  },
+  "scripts": {
+    "check:builder": "node --check tools/pump_builder.mjs && node --check tools/pump_builder_service.mjs && node tools/check_sdk.mjs"
+  },
+  "dependencies": {
+    "@pump-fun/pump-sdk": "1.36.0",
+    "@pump-fun/pump-swap-sdk": "1.19.0",
+    "@solana/web3.js": "^1.98.4",
+    "bn.js": "^5.2.2"
+  },
+  "overrides": {
+    "jayson": {
+      "uuid": "11.1.1"
+    }
+  }
+}

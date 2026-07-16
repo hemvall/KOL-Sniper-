@@ -1,0 +1,30 @@
+[Unit]
+Description=KOL Sniper Telegram signal executor
+After=network-online.target kol-sniper-builder.service
+Wants=network-online.target kol-sniper-builder.service
+
+[Service]
+Type=simple
+User=sniper
+Group=sniper
+WorkingDirectory=/opt/kol-sniper
+EnvironmentFile=/opt/kol-sniper/.env
+Environment=LOCAL_BUILDER_URL=http://127.0.0.1:8788
+ExecStart=/opt/kol-sniper/.venv/bin/python /opt/kol-sniper/sniper.py
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=75
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/opt/kol-sniper/data
+
+[Install]
+WantedBy=multi-user.target

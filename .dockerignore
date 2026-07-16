@@ -1,0 +1,12 @@
+.git
+.env
+*.session
+*.session-journal
+.venv
+node_modules
+data
+__pycache__
+.pytest_cache
+.ruff_cache
+tests
+calls.csv

@@ -1,0 +1,39 @@
+services:
+  builder:
+    build:
+      context: .
+      target: builder
+    environment:
+      RPC_URL: ${RPC_URL:-https://api.mainnet-beta.solana.com}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+
+  sniper:
+    build:
+      context: .
+      target: app
+    env_file: .env
+    environment:
+      TELEGRAM_SESSION: /app/data/sniper_session
+      LOCAL_BUILDER_URL: http://builder:8788
+    depends_on:
+      builder:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 60s
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    volumes:
+      - sniper-data:/app/data
+
+volumes:
+  sniper-data:

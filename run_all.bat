@@ -1,5 +1,7 @@
 @echo off
-cd /d %~dp0
-start "sniper" python sniper.py
-start "telegram_bot" python telegram_bot.py
-echo Started sniper.py and telegram_bot.py
+if not exist .venv\Scripts\python.exe (
+  echo Create the virtual environment and install requirements first.
+  exit /b 1
+)
+start "KOL Sniper" .venv\Scripts\python.exe sniper.py
+start "KOL Sniper Admin" .venv\Scripts\python.exe telegram_bot.py

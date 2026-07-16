@@ -1,8 +1,6 @@
-python-dotenv
-requests
-websockets
-solder
-numpy
-colorama
-python-telegram-bot
-telethon
+python-dotenv>=1.2,<2
+requests>=2.32,<3
+solders>=0.28,<0.29
+Telethon>=1.44,<1.45
+websockets>=15,<16
+python-telegram-bot>=22,<23

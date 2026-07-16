@@ -1,0 +1,30 @@
+[Unit]
+Description=Isolated official Pump SDK transaction builder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sniper-builder
+Group=sniper-builder
+WorkingDirectory=/opt/kol-sniper
+EnvironmentFile=/etc/kol-sniper-builder.env
+Environment=NODE_ENV=production
+Environment=BUILDER_HOST=127.0.0.1
+Environment=BUILDER_PORT=8788
+ExecStart=/usr/bin/node /opt/kol-sniper/tools/pump_builder_service.mjs
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
